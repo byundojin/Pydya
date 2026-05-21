@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydya"
+version = "0.0.1"
+description = "A Nadya-style partial-evaluation compiler for Python source"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+include = ["pydya*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
