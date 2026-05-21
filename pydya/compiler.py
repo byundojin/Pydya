@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from typing import Any, Mapping, Optional
 
+from pydya.passes.collect import collect_static_env
+
 
 def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     """Partially evaluate ``source`` against the compile-time environment.
@@ -14,6 +16,8 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     """
     env = dict(env or {})
     tree = ast.parse(source)
+    static_values = collect_static_env(tree, env)
+    del static_values  # consumed by later passes once they are wired in
     # Passes are wired in here as they are implemented.
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
