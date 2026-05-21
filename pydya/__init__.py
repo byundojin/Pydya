@@ -2,7 +2,7 @@
 
 from pydya.compilevar import CompileVar
 from pydya.compiler import compile_source
-from pydya.importer import configure
+from pydya.importer import install
 from pydya.specialize import specialize
 
-__all__ = ["CompileVar", "compile_source", "specialize", "configure"]
+__all__ = ["CompileVar", "compile_source", "specialize", "install"]

@@ -52,9 +52,13 @@ def _compilevar_decl(node: ast.stmt) -> Tuple[str, str] | None:
 
 def _is_pydya_import(node: ast.stmt) -> bool:
     if isinstance(node, ast.ImportFrom):
-        return node.module == "pydya"
+        mod = node.module or ""
+        return mod == "pydya" or mod.startswith("pydya.")
     if isinstance(node, ast.Import):
-        return any(alias.name == "pydya" for alias in node.names)
+        return any(
+            alias.name == "pydya" or alias.name.startswith("pydya.")
+            for alias in node.names
+        )
     return False
 
 

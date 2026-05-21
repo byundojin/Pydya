@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 
 if __name__ == "__main__":
-    importer.configure({"SCALE": 4}, modules={"_kernel"})
-    import _kernel
+    importer.install({"SCALE": 4})  # 값 공급 + 훅 설치 (import 이전에)
+    import _kernel  # 상단의 specialize_here 마커로 opt-in 되어 특수화됨
 
     print("=== _kernel.scaled(10) with SCALE = 4 ===")
     print(_kernel.scaled(10))  # 40
