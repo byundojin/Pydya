@@ -12,6 +12,20 @@ from pydya.passes.fold import fold
 from pydya.passes.inline import inline_calls
 
 
+def optimize(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
+    """정적 값을 기준으로 폴딩→분기제거→인라인→DCE 파이프라인을 적용한다.
+
+    모듈 트리든 함수 정의 노드든 동일하게 동작한다(데코레이터 경로에서 함수
+    본문에 직접 적용하기 위해 공유한다).
+    """
+    fold(tree, static_values)
+    eliminate_branches(tree)
+    inline_calls(tree)
+    eliminate_dead_code(tree)
+    ast.fix_missing_locations(tree)
+    return tree
+
+
 def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     """컴파일 타임 환경 ``env`` 를 기준으로 ``source`` 를 부분 평가한다.
 
@@ -21,9 +35,5 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     env = dict(env or {})
     tree = ast.parse(source)
     static_values = collect_static_env(tree, env)
-    fold(tree, static_values)
-    eliminate_branches(tree)
-    inline_calls(tree)
-    eliminate_dead_code(tree)
-    ast.fix_missing_locations(tree)
+    optimize(tree, static_values)
     return ast.unparse(tree)
