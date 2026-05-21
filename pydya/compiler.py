@@ -6,6 +6,7 @@ import ast
 from typing import Any, Mapping, Optional
 
 from pydya.passes.collect import collect_static_env
+from pydya.passes.fold import fold
 
 
 def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
@@ -17,7 +18,7 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     env = dict(env or {})
     tree = ast.parse(source)
     static_values = collect_static_env(tree, env)
-    del static_values  # consumed by later passes once they are wired in
-    # Passes are wired in here as they are implemented.
+    fold(tree, static_values)
+    # Further passes (branch elimination, inlining, DCE) are wired in here.
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)

@@ -7,11 +7,11 @@ def test_compilevar_repr():
     assert repr(CompileVar("V")) == "CompileVar('V')"
 
 
-def test_passthrough_is_valid_python():
-    src = "x = 1 + 2\nprint(x)\n"
+def test_output_is_valid_python():
+    src = "x = a + 1\nprint(x)\n"
     out = compile_source(src)
-    # No passes yet: output must still be semantically parseable Python.
-    assert ast.dump(ast.parse(out)) == ast.dump(ast.parse(src))
+    ast.parse(out)  # output must parse
+    assert "print(x)" in out
 
 
 def test_env_accepts_mapping():
