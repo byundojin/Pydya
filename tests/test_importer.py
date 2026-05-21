@@ -16,7 +16,7 @@ def test_marked_module_is_specialized(tmp_path, monkeypatch):
         tmp_path,
         "kernel_mod",
         "from pydya import CompileVar\n"
-        "from pydya.module import specialize_here\n"
+        "from pydya.importer import specialize_here\n"
         "SCALE = CompileVar[int]()\n"
         "def scaled(x):\n"
         "    return x * SCALE\n",

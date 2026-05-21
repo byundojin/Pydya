@@ -2,7 +2,7 @@
 
 ``from __future__ import annotations`` 처럼, 각 모듈이 상단에서 ::
 
-    from pydya.module import specialize_here
+    from pydya.importer import specialize_here
 
 마커를 import 하는 것으로 *스스로* opt-in 한다. 훅이 설치되면, import 되는
 모듈의 소스에 이 마커가 있을 때만 :func:`compile_source` 로 부분 평가한 뒤
@@ -28,7 +28,13 @@ import sys
 from typing import Any, Dict, Mapping
 
 from pydya.compiler import compile_source
-from pydya.module import MARKER
+
+# import 시점 특수화 opt-in 마커. 모듈 상단에서
+# ``from pydya.importer import specialize_here`` 로 import 하면 그 모듈은
+# 훅이 설치된 상태에서 로드 시 부분 평가된다. ``from __future__`` 디렉티브와
+# 같은 역할이며 런타임 의미는 없다(훅이 소스에서 이름 존재만 확인한다).
+MARKER = "specialize_here"
+specialize_here = object()
 
 _ENV: Dict[str, Any] = {}
 
