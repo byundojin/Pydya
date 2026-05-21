@@ -1,6 +1,6 @@
-"""Demonstrate Pydya on the README example.
+"""README 예시로 Pydya 동작을 보여준다.
 
-Run with:  python examples/readme_example.py
+실행:  python examples/readme_example.py
 """
 
 from pydya import compile_source

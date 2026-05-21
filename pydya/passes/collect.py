@@ -1,4 +1,4 @@
-"""Collect ``CompileVar`` declarations and strip compile-time-only nodes."""
+"""``CompileVar`` 선언을 수집하고 컴파일 타임 전용 노드를 제거한다."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from typing import Any, Dict, Mapping
 
 
 class MissingCompileValue(KeyError):
-    """Raised when a declared CompileVar has no value in the environment."""
+    """선언된 CompileVar 의 값이 환경에 없을 때 발생한다."""
 
 
 def _compilevar_label(call: ast.Call) -> str | None:
-    """Return the string label of a ``CompileVar('label')`` call, else None."""
+    """``CompileVar('label')`` 호출의 문자열 레이블을 반환, 아니면 None."""
     func = call.func
     is_compilevar = (isinstance(func, ast.Name) and func.id == "CompileVar") or (
         isinstance(func, ast.Attribute) and func.attr == "CompileVar"
@@ -35,11 +35,11 @@ def _is_pydya_import(node: ast.stmt) -> bool:
 def collect_static_env(
     tree: ast.Module, env: Mapping[str, Any]
 ) -> Dict[str, Any]:
-    """Strip CompileVar declarations / pydya imports and return the static env.
+    """CompileVar 선언과 pydya import 를 제거하고 정적 환경을 반환한다.
 
-    The returned mapping is keyed by the *variable name* bound in the source
-    (e.g. ``V`` in ``V = CompileVar('V')``) and holds the concrete value drawn
-    from ``env`` under the CompileVar label.
+    반환되는 매핑의 키는 소스에서 바인딩된 *변수 이름* 이며
+    (예: ``V = CompileVar('V')`` 의 ``V``), 값은 CompileVar 레이블로
+    ``env`` 에서 가져온 구체적인 값이다.
     """
     static_values: Dict[str, Any] = {}
     new_body = []

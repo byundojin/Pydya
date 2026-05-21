@@ -30,5 +30,5 @@ def test_fixpoint_removes_chained_dead_stores():
 
 
 def test_module_top_level_bindings_are_preserved():
-    # Top-level names may be exports, so they are never pruned.
+    # 최상위 이름은 export 일 수 있으므로 절대 제거하지 않는다.
     assert _run("a = 1\n") == "a = 1"

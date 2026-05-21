@@ -1,1 +1,1 @@
-"""Compiler passes for Pydya."""
+"""Pydya의 컴파일러 패스 모음."""

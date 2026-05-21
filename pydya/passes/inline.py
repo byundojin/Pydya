@@ -1,13 +1,11 @@
-"""Specialize and inline calls to simple functions with constant arguments.
+"""상수 인자로 호출되는 단순 함수를 특수화하여 인라인한다.
 
-A "simple" function is a module-level ``def`` whose body is a single
-``return <expr>`` and which takes only positional parameters. When such a
-function is called with all-constant arguments, the call is replaced by the
-return expression with the parameters substituted and folded -- the same
-beta-reduction Nadya performs when monomorphizing a template.
+"단순" 함수란 본문이 단일 ``return <expr>`` 이고 위치 인자만 받는 모듈
+최상위 ``def`` 를 말한다. 이런 함수가 모두 상수인 인자로 호출되면, 호출은
+파라미터를 치환·폴딩한 반환식으로 대체된다. 이는 Nadya 가 템플릿을
+단형화(monomorphize)할 때 수행하는 베타 축약과 동일하다.
 
-Only constant arguments are inlined, so no runtime expression is ever
-duplicated or reordered.
+상수 인자일 때만 인라인하므로 런타임 식이 중복되거나 순서가 바뀌는 일은 없다.
 """
 
 from __future__ import annotations

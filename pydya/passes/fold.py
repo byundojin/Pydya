@@ -1,7 +1,7 @@
-"""Constant propagation and folding for static (CompileVar) values.
+"""정적(CompileVar) 값에 대한 상수 전파 및 폴딩.
 
-Only names bound to CompileVar values are substituted; ordinary bindings are
-left as residual runtime code even when their right-hand side is constant.
+CompileVar 값에 바인딩된 이름만 치환한다. 일반 바인딩은 우변이 상수더라도
+런타임 잔여 코드로 그대로 남긴다.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ class _Folder(ast.NodeTransformer):
                 result = v
                 if not v:
                     break
-        else:  # Or
+        else:  # Or 연산
             result = False
             for v in values:
                 result = v
@@ -115,7 +115,7 @@ class _Folder(ast.NodeTransformer):
 
 
 def fold(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
-    """Substitute static names and fold the resulting constant expressions."""
+    """정적 이름을 치환하고 그 결과로 생긴 상수 식을 폴딩한다."""
     folded = _Folder(static_values).visit(tree)
     ast.fix_missing_locations(folded)
     return folded

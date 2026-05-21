@@ -1,13 +1,13 @@
-"""Dead store elimination for side-effect-free assignments.
+"""부작용 없는 대입에 대한 죽은 저장(dead store) 제거.
 
-Removes ``X = <pure expr>`` when ``X`` is never loaded anywhere in the
-module. Only side-effect-free right-hand sides are eligible, so removing the
-statement cannot change observable behaviour. Runs to a fixpoint because
-removing one dead store can make an earlier one dead.
+``X`` 가 모듈 어디에서도 로드되지 않으면 ``X = <순수 식>`` 을 제거한다.
+부작용 없는 우변만 대상이 되므로 문장을 제거해도 관찰 가능한 동작은
+바뀌지 않는다. 죽은 저장 하나를 제거하면 앞선 저장이 죽을 수 있으므로
+고정점(fixpoint)에 도달할 때까지 반복한다.
 
-Module top-level bindings are never removed: they may be imported by other
-modules, so we cannot prove them unused from this source alone. Pruning is
-therefore limited to function bodies.
+모듈 최상위 바인딩은 절대 제거하지 않는다. 다른 모듈에서 import 될 수
+있어 이 소스만으로는 미사용임을 증명할 수 없기 때문이다. 따라서 제거는
+함수 본문으로 한정한다.
 """
 
 from __future__ import annotations
@@ -53,10 +53,10 @@ def _dead_target(node: ast.stmt, used: set) -> bool:
 
 
 def _prune_bodies(node: ast.AST, used: set, prunable: bool) -> bool:
-    """Remove dead assignments from statement lists under ``node``.
+    """``node`` 아래의 문장 리스트에서 죽은 대입을 제거한다.
 
-    ``prunable`` is False while walking the module's own top-level body so
-    that potential exports are preserved; it becomes True inside functions.
+    모듈 최상위 본문을 순회하는 동안에는 ``prunable`` 이 False 이므로
+    export 가능성이 있는 항목을 보존하고, 함수 내부로 들어가면 True 가 된다.
     """
     inside_func = prunable or isinstance(
         node, (ast.FunctionDef, ast.AsyncFunctionDef)

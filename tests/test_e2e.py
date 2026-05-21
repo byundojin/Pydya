@@ -49,7 +49,7 @@ def test_compiled_output_runs_with_same_observable_behaviour():
 
 def test_else_branch_selected_for_large_value():
     out = compile_source(SOURCE, env={"V": 9})
-    # V < 5 is false, so 'a = 5' is taken and f is never called.
+    # V < 5 가 거짓이므로 'a = 5' 가 선택되고 f 는 호출되지 않는다.
     assert "a = 5" in out
     assert "f(5)" not in out
     buf = io.StringIO()

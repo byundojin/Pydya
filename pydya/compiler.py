@@ -1,4 +1,4 @@
-"""Pass pipeline that turns Python source into partially evaluated source."""
+"""Python 소스를 부분 평가된 소스로 변환하는 패스 파이프라인."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from pydya.passes.inline import inline_calls
 
 
 def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
-    """Partially evaluate ``source`` against the compile-time environment.
+    """컴파일 타임 환경 ``env`` 를 기준으로 ``source`` 를 부분 평가한다.
 
-    ``env`` maps the names passed to ``CompileVar(...)`` to their compile-time
-    values. Returns the transformed source as a string.
+    ``env`` 는 ``CompileVar(...)`` 에 전달한 이름을 컴파일 타임 값으로
+    매핑한다. 변환된 소스를 문자열로 반환한다.
     """
     env = dict(env or {})
     tree = ast.parse(source)

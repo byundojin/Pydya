@@ -26,8 +26,7 @@ def test_folds_nested_arithmetic():
 
 
 def test_does_not_propagate_runtime_binding():
-    # 'a' is a runtime binding, so its use is not substituted even though
-    # the right-hand side is constant.
+    # 'a' 는 런타임 바인딩이므로 우변이 상수여도 그 사용처는 치환하지 않는다.
     assert _fold("a = 8\nb = a + V\n", {"V": 3}) == "a = 8\nb = a + 3"
 
 

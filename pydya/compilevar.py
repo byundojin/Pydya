@@ -1,12 +1,12 @@
-"""Compile-time variable marker for Pydya."""
+"""Pydya의 컴파일 타임 변수 마커."""
 
 
 class CompileVar:
-    """A symbol whose value is fixed at compile time.
+    """컴파일 시점에 값이 고정되는 심볼.
 
-    Declaring ``X = CompileVar('name')`` in source marks ``X`` as a static
-    binding. The concrete value is supplied to :func:`pydya.compile_source`
-    through the ``env`` mapping keyed by ``name``.
+    소스에서 ``X = CompileVar('name')`` 으로 선언하면 ``X`` 는 정적(static)
+    바인딩으로 표시된다. 실제 값은 ``env`` 매핑에서 ``name`` 키로
+    :func:`pydya.compile_source` 에 전달된다.
     """
 
     def __init__(self, name: str):
