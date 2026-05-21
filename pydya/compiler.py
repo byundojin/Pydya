@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional
 from pydya.passes.branch import eliminate_branches
 from pydya.passes.collect import collect_static_env
 from pydya.passes.fold import fold
+from pydya.passes.inline import inline_calls
 
 
 def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
@@ -21,6 +22,7 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     static_values = collect_static_env(tree, env)
     fold(tree, static_values)
     eliminate_branches(tree)
-    # Further passes (inlining, DCE) are wired in here.
+    inline_calls(tree)
+    # Further passes (DCE) are wired in here.
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
