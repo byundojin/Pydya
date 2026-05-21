@@ -6,7 +6,7 @@
 from pydya import compile_source
 
 SOURCE = """\
-V = CompileVar('V')
+V = CompileVar[int]()
 
 def f(a):
     return a + V

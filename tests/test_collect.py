@@ -40,3 +40,28 @@ def test_ignores_unrelated_assignments():
     static = collect_static_env(tree, {})
     assert static == {}
     assert ast.unparse(tree).strip() == "a = foo('V')"
+
+
+def test_typed_form_label_from_target():
+    tree = _parse("V = CompileVar[int]()\nx = V\n")
+    static = collect_static_env(tree, {"V": 3})
+    assert static == {"V": 3}
+    assert ast.unparse(tree).strip() == "x = V"
+
+
+def test_no_arg_form_label_from_target():
+    tree = _parse("V = CompileVar()\n")
+    static = collect_static_env(tree, {"V": 7})
+    assert static == {"V": 7}
+
+
+def test_typed_form_missing_value_raises():
+    tree = _parse("V = CompileVar[int]()\n")
+    with pytest.raises(MissingCompileValue):
+        collect_static_env(tree, {})
+
+
+def test_attribute_typed_form():
+    tree = _parse("V = pydya.CompileVar[str]()\n")
+    static = collect_static_env(tree, {"V": "hi"})
+    assert static == {"V": "hi"}
