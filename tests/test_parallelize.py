@@ -50,6 +50,19 @@ def test_reads_outer_captures():
     assert ns["out"] == [0, 10, 20]
 
 
+def test_comprehension_in_body_does_not_capture_inner_var():
+    # 제너레이터의 루프 변수 j 는 외부 캡처가 아니므로 captures 에 들어가면 안 된다.
+    compiled, ns = _run(
+        "from pydya import attr\n"
+        "out = [0] * 3\n"
+        "attr[{'parallel': True}]\n"
+        "for i in range(3):\n"
+        "    out[i] = sum(i * j for j in range(4))\n"
+    )
+    assert "{}" in compiled  # 캡처 없음
+    assert ns["out"] == [0, 6, 12]
+
+
 def test_parallel_false_leaves_serial_loop():
     compiled, ns = _run(
         "from pydya import attr\n"

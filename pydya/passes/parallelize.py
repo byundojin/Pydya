@@ -92,13 +92,24 @@ def _independent_map(
 
 
 def _free_names(expr: ast.expr, loop_var: str) -> List[str]:
-    """``expr`` 이 읽는 외부 이름(루프 변수·빌트인 제외)을 순서대로 반환한다."""
+    """``expr`` 이 읽는 외부 이름을 순서대로 반환한다.
+
+    루프 변수, 빌트인, 그리고 expr 내부에서 바인딩되는 이름(컴프리헨션/제너레이터
+    타깃, 람다 인자, 월러스 대상)은 제외한다.
+    """
+    bound = {loop_var}
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+
     names: List[str] = []
     seen = set()
     for node in ast.walk(expr):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             name = node.id
-            if name == loop_var or name in _BUILTIN_NAMES or name in seen:
+            if name in bound or name in _BUILTIN_NAMES or name in seen:
                 continue
             seen.add(name)
             names.append(name)
