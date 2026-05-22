@@ -19,10 +19,12 @@ Nadya 의 ``attr[Parallel : true] for(...)`` 와 같은 모델이다. for 루프
 from __future__ import annotations
 
 import ast
+import builtins
 from typing import List, Optional, Tuple
 
 _RT_ALIAS = "__pydya_rt"
 _BODY_FIELDS = ("body", "orelse", "finalbody")
+_BUILTIN_NAMES = frozenset(dir(builtins))
 
 
 class UnsafeParallelLoop(Exception):
@@ -89,6 +91,20 @@ def _independent_map(
     return loop_var, target_name, expr
 
 
+def _free_names(expr: ast.expr, loop_var: str) -> List[str]:
+    """``expr`` 이 읽는 외부 이름(루프 변수·빌트인 제외)을 순서대로 반환한다."""
+    names: List[str] = []
+    seen = set()
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            name = node.id
+            if name == loop_var or name in _BUILTIN_NAMES or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def _build_parallel_call(
     for_node: ast.For,
     loop_var: str,
@@ -96,17 +112,10 @@ def _build_parallel_call(
     expr: ast.expr,
     workers: Optional[ast.expr],
 ) -> ast.Assign:
-    lam = ast.Lambda(
-        args=ast.arguments(
-            posonlyargs=[],
-            args=[ast.arg(arg=loop_var)],
-            vararg=None,
-            kwonlyargs=[],
-            kw_defaults=[],
-            kwarg=None,
-            defaults=[],
-        ),
-        body=expr,
+    capture_names = _free_names(expr, loop_var)
+    captures = ast.Dict(
+        keys=[ast.Constant(value=n) for n in capture_names],
+        values=[ast.Name(id=n, ctx=ast.Load()) for n in capture_names],
     )
     keywords = []
     if workers is not None:
@@ -120,7 +129,9 @@ def _build_parallel_call(
         args=[
             ast.Name(id=target_name, ctx=ast.Load()),
             for_node.iter,
-            lam,
+            ast.Constant(value=ast.unparse(expr)),
+            ast.Constant(value=loop_var),
+            captures,
         ],
         keywords=keywords,
     )
