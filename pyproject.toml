@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "pydya"
 version = "0.0.1"
 description = "A Nadya-style partial-evaluation compiler for Python source"
-requires-python = ">=3.9"
+# 3.14+ 에서 attr 병렬 루프가 서브인터프리터(인터프리터별 GIL) 백엔드로 진짜
+# 멀티코어를 사용한다. 이전 버전에서는 스레드풀/직렬로 폴백한다.
+requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
 include = ["pydya*"]
