@@ -10,6 +10,7 @@ from pydya.passes.collect import collect_static_env
 from pydya.passes.dce import eliminate_dead_code
 from pydya.passes.fold import fold
 from pydya.passes.inline import inline_calls
+from pydya.passes.parallelize import parallelize
 
 
 def optimize(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
@@ -36,4 +37,5 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     tree = ast.parse(source)
     static_values = collect_static_env(tree, env)
     optimize(tree, static_values)
+    parallelize(tree)
     return ast.unparse(tree)
