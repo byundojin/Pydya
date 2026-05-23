@@ -1,8 +1,11 @@
-"""정적 ``range`` 로 반복하는 for 루프를 컴파일 타임에 펼친다.
+"""CompileVar 가 들어간 ``range`` for 루프를 컴파일 타임에 펼친다.
 
-Nadya 의 ``template<>`` 메타프로그래밍으로 SIMD 슬롯폭을 정해 펼치는 것을
-Pydya 의 부분평가로 재현한다. ``for i in range(K)`` 의 ``K`` 가 fold 이후
-정적 상수로 결정되면, 본문을 ``i = 0 .. K-1`` 로 펼쳐 그 자리에 풀어 둔다.
+Nadya 의 ``template</vectorBitWidth/>`` 메타프로그래밍이 SIMD 슬롯폭만큼
+루프를 펼치는 것을 Pydya 의 부분평가로 재현한다. Pydya 의 ``CompileVar`` 가
+Nadya 의 template 파라미터에 대응하므로, **range 인자가 CompileVar 에
+의존하는 for 루프만** 단형화 대상으로 표시(``mark_template_loops``) 했다가
+펼친다. 단순 리터럴 정수 range(예: ``for i in range(8)``)는 컴파일러 과잉
+이라 보고 펼치지 않는다.
 
 예::
 
@@ -29,13 +32,17 @@ from __future__ import annotations
 
 import ast
 import copy
-from typing import List, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Tuple
 
 from pydya.passes.fold import fold
 
 # 펼치기로 결정하는 최대 반복 횟수. 너무 큰 범위까지 펼치면 코드가 폭발하므로
-# 보수적 기본값을 둔다(추후 attr opt-in 으로 강제 펼치기 가능).
+# 보수적 기본값을 둔다.
 DEFAULT_THRESHOLD = 64
+
+# fold 이전에 마킹할 때 For 노드에 다는 속성 이름. unroll 패스는 이 속성이
+# 붙은 노드만 펼침 대상으로 본다.
+_TEMPLATE_FLAG = "_pydya_template"
 
 
 def _range_args(call: ast.Call) -> Optional[Tuple[int, int, int]]:
@@ -134,6 +141,51 @@ def _unroll_once(body: List[ast.stmt], loop_var: str, value: int) -> List[ast.st
     return block.body
 
 
+def _depends_on_statics(node: ast.AST, statics: set) -> bool:
+    """``node`` 안에 정적 환경 이름(CompileVar 출신)을 Load 하는 곳이 있는지."""
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Name)
+            and isinstance(sub.ctx, ast.Load)
+            and sub.id in statics
+        ):
+            return True
+    return False
+
+
+class _TemplateMarker(ast.NodeVisitor):
+    """fold 이전에 호출. range 인자가 정적 환경 이름(CompileVar) 에 의존하는
+    for 루프에 :data:`_TEMPLATE_FLAG` 속성을 단다.
+    """
+
+    def __init__(self, statics: set):
+        self.statics = statics
+
+    def visit_For(self, node: ast.For):  # noqa: N802
+        iter_ = node.iter
+        if (
+            isinstance(iter_, ast.Call)
+            and isinstance(iter_.func, ast.Name)
+            and iter_.func.id == "range"
+            and not iter_.keywords
+            and 1 <= len(iter_.args) <= 3
+            and any(_depends_on_statics(a, self.statics) for a in iter_.args)
+        ):
+            setattr(node, _TEMPLATE_FLAG, True)
+        self.generic_visit(node)
+
+
+def mark_template_loops(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
+    """fold 이전에 호출. CompileVar 출신 값을 range 인자에 쓰는 for 루프를
+    이후 :func:`unroll` 의 대상으로 표시한다.
+
+    Nadya 의 ``template<>`` 가 컴파일타임 파라미터로 단형화를 트리거하는 것과
+    같은 결: 리터럴 상수 range 는 표시하지 않으므로 unroll 도 안 한다.
+    """
+    _TemplateMarker(set(static_values)).visit(tree)
+    return tree
+
+
 class _Unroller(ast.NodeTransformer):
     def __init__(self, threshold: int):
         self.threshold = threshold
@@ -141,6 +193,10 @@ class _Unroller(ast.NodeTransformer):
     def visit_For(self, node: ast.For):  # noqa: N802
         # 먼저 안쪽 본문/iter 를 처리해서 중첩된 for 가 이미 펼쳐진 상태로 본다.
         self.generic_visit(node)
+
+        # CompileVar 의존 for 만 펼친다. 그 외(리터럴 range)는 손대지 않는다.
+        if not getattr(node, _TEMPLATE_FLAG, False):
+            return node
 
         triple = _range_args(node.iter)
         if triple is None:
@@ -161,7 +217,7 @@ class _Unroller(ast.NodeTransformer):
 
 
 def unroll(tree: ast.AST, threshold: int = DEFAULT_THRESHOLD) -> ast.AST:
-    """정적 ``range`` 로 반복하는 for 루프를 펼친다.
+    """:func:`mark_template_loops` 가 표시한 for 루프를 펼친다.
 
     ``threshold`` 보다 큰 반복 횟수는 코드 폭발을 막기 위해 펼치지 않는다.
     """

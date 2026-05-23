@@ -11,17 +11,18 @@ from pydya.passes.dce import eliminate_dead_code
 from pydya.passes.fold import fold
 from pydya.passes.inline import inline_calls
 from pydya.passes.parallelize import parallelize
-from pydya.passes.unroll import unroll
+from pydya.passes.unroll import mark_template_loops, unroll
 
 
 def optimize(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
-    """정적 값을 기준으로 폴딩→분기제거→인라인→DCE 파이프라인을 적용한다.
+    """정적 값을 기준으로 단형화→폴딩→분기제거→인라인→DCE 파이프라인을 적용.
 
     모듈 트리든 함수 정의 노드든 동일하게 동작한다(데코레이터 경로에서 함수
     본문에 직접 적용하기 위해 공유한다).
     """
+    # 마킹은 fold 이전(Name 'W' 가 아직 살아 있을 때).
+    mark_template_loops(tree, static_values)
     fold(tree, static_values)
-    # fold 가 CompileVar 이름을 상수로 바꾼 다음에 unroll 이 정적 range 를 펼친다.
     unroll(tree)
     eliminate_branches(tree)
     inline_calls(tree)
@@ -36,14 +37,16 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
     ``env`` 는 ``CompileVar(...)`` 에 전달한 이름을 컴파일 타임 값으로
     매핑한다. 변환된 소스를 문자열로 반환한다.
 
-    파이프라인 순서: collect → fold → parallelize → unroll → branch → inline → dce.
-    parallelize 가 ``attr[parallel]`` 마커가 붙은 for 를 먼저 병렬 호출로 lowering
-    해야 unroll 이 그 자리를 모른 척 지나간다(병렬 루프가 컴파일타임에 펼쳐지면
-    의도와 어긋남).
+    파이프라인 순서: collect → mark → fold → parallelize → unroll → branch
+    → inline → dce. mark 는 CompileVar 출신 값에 의존하는 for 루프를 표시
+    하고(이후 unroll 의 대상), parallelize 는 ``attr[parallel]`` 마커가 붙은
+    for 를 먼저 병렬 호출로 lowering 한다(unroll 이 그 자리를 건드리지
+    않도록).
     """
     env = dict(env or {})
     tree = ast.parse(source)
     static_values = collect_static_env(tree, env)
+    mark_template_loops(tree, static_values)
     fold(tree, static_values)
     parallelize(tree)
     unroll(tree)
