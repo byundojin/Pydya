@@ -1,11 +1,27 @@
-"""CompileVar 가 들어간 ``range`` for 루프를 컴파일 타임에 펼친다.
+"""``attr[{'unroll': True}]`` 마커가 붙은 for 루프를 컴파일 타임에 펼친다.
 
-Nadya 의 ``template</vectorBitWidth/>`` 메타프로그래밍이 SIMD 슬롯폭만큼
-루프를 펼치는 것을 Pydya 의 부분평가로 재현한다. Pydya 의 ``CompileVar`` 가
-Nadya 의 template 파라미터에 대응하므로, **range 인자가 CompileVar 에
-의존하는 for 루프만** 단형화 대상으로 표시(``mark_template_loops``) 했다가
-펼친다. 단순 리터럴 정수 range(예: ``for i in range(8)``)는 컴파일러 과잉
-이라 보고 펼치지 않는다.
+소스에서 for 루프 바로 앞에 ``attr[{'unroll': True}]`` 를 두면, Pydya 가 그
+다음 ``for i in range(K)`` 의 본문을 ``i = 0..K-1`` 로 펼친다. ``K`` 가
+컴파일 타임에 상수로 결정되어야 하며(예: ``range(W)`` 에서 ``W`` 가
+:class:`CompileVar`), 그렇지 않으면 펼치지 않는다.
+
+마커 인식·소비는 :mod:`pydya.passes.parallelize` 가 일괄 담당하고, 이 패스는
+거기서 :data:`_UNROLL_FLAG` 가 표시된 for 노드만 처리한다.
+
+한계 (정직한 경고)
+------------------
+이 unroll 은 *부분평가 컴파일러의 substrate* 다. 펼친 결과는 인간이 읽을 수
+있는 직선 Python 이고, 다음과 같은 가치를 가진다:
+
+* 본문에 다른 ``CompileVar`` 가 있으면 그 자리에 상수가 박혀 추가 fold 가능
+* (예정) Phase 2 C Tensor / Phase 3 표현식 융합 패스가 직선 트리에서 패턴
+  매칭하기 쉬워짐
+
+그러나 **그 자체로는 런타임 성능 이득이 없다.** Optimium 이 unroll 로 노리는
+이득(메모리 접근 감소, SIMD 벡터화, ILP, register reuse)은 모두 *네이티브
+바이너리 컴파일* 을 전제로 한다. CPython 바이트코드 VM 위에서는 펼친 코드가
+오히려 코드 크기 증가로 손해를 볼 수 있다. 진짜 가속은 Phase 2/3 에서 본문을
+네이티브 C 호출로 lowering 한 뒤에야 따라온다.
 
 예::
 
@@ -13,6 +29,7 @@ Nadya 의 template 파라미터에 대응하므로, **range 인자가 CompileVar
 
     def dot_product(a, b):
         result = 0
+        attr[{'unroll': True}]
         for i in range(W):
             result += a[i] * b[i]
         return result
@@ -32,7 +49,7 @@ from __future__ import annotations
 
 import ast
 import copy
-from typing import Any, List, Mapping, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from pydya.passes.fold import fold
 
@@ -40,9 +57,13 @@ from pydya.passes.fold import fold
 # 보수적 기본값을 둔다.
 DEFAULT_THRESHOLD = 64
 
-# fold 이전에 마킹할 때 For 노드에 다는 속성 이름. unroll 패스는 이 속성이
-# 붙은 노드만 펼침 대상으로 본다.
-_TEMPLATE_FLAG = "_pydya_template"
+# parallelize 패스가 attr[{'unroll': True}] 마커를 읽고 다음 for 노드에 다는
+# 속성 이름. unroll 패스는 이 플래그가 붙은 노드만 처리한다.
+_UNROLL_FLAG = "_pydya_unroll"
+
+
+class UnrollError(Exception):
+    """unroll opt-in 이 잘못 사용된 경우."""
 
 
 def _range_args(call: ast.Call) -> Optional[Tuple[int, int, int]]:
@@ -119,9 +140,7 @@ class _LocalLoopWalker(ast.NodeVisitor):
             self.stores_loop_var = True
 
 
-def _can_unroll(node: ast.For, count: int, threshold: int) -> bool:
-    if count < 0 or count > threshold:
-        return False
+def _safe_to_unroll(node: ast.For) -> bool:
     if node.orelse:  # for-else 는 보수적으로 보류
         return False
     if not isinstance(node.target, ast.Name):
@@ -141,70 +160,36 @@ def _unroll_once(body: List[ast.stmt], loop_var: str, value: int) -> List[ast.st
     return block.body
 
 
-def _depends_on_statics(node: ast.AST, statics: set) -> bool:
-    """``node`` 안에 정적 환경 이름(CompileVar 출신)을 Load 하는 곳이 있는지."""
-    for sub in ast.walk(node):
-        if (
-            isinstance(sub, ast.Name)
-            and isinstance(sub.ctx, ast.Load)
-            and sub.id in statics
-        ):
-            return True
-    return False
-
-
-class _TemplateMarker(ast.NodeVisitor):
-    """fold 이전에 호출. range 인자가 정적 환경 이름(CompileVar) 에 의존하는
-    for 루프에 :data:`_TEMPLATE_FLAG` 속성을 단다.
-    """
-
-    def __init__(self, statics: set):
-        self.statics = statics
-
-    def visit_For(self, node: ast.For):  # noqa: N802
-        iter_ = node.iter
-        if (
-            isinstance(iter_, ast.Call)
-            and isinstance(iter_.func, ast.Name)
-            and iter_.func.id == "range"
-            and not iter_.keywords
-            and 1 <= len(iter_.args) <= 3
-            and any(_depends_on_statics(a, self.statics) for a in iter_.args)
-        ):
-            setattr(node, _TEMPLATE_FLAG, True)
-        self.generic_visit(node)
-
-
-def mark_template_loops(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
-    """fold 이전에 호출. CompileVar 출신 값을 range 인자에 쓰는 for 루프를
-    이후 :func:`unroll` 의 대상으로 표시한다.
-
-    Nadya 의 ``template<>`` 가 컴파일타임 파라미터로 단형화를 트리거하는 것과
-    같은 결: 리터럴 상수 range 는 표시하지 않으므로 unroll 도 안 한다.
-    """
-    _TemplateMarker(set(static_values)).visit(tree)
-    return tree
-
-
 class _Unroller(ast.NodeTransformer):
     def __init__(self, threshold: int):
         self.threshold = threshold
 
     def visit_For(self, node: ast.For):  # noqa: N802
-        # 먼저 안쪽 본문/iter 를 처리해서 중첩된 for 가 이미 펼쳐진 상태로 본다.
+        # 먼저 안쪽 본문을 처리해서 중첩된 marked for 가 이미 펼쳐진 상태로 본다.
         self.generic_visit(node)
 
-        # CompileVar 의존 for 만 펼친다. 그 외(리터럴 range)는 손대지 않는다.
-        if not getattr(node, _TEMPLATE_FLAG, False):
+        # attr opt-in 이 없는 for 는 손대지 않는다.
+        if not getattr(node, _UNROLL_FLAG, False):
             return node
 
         triple = _range_args(node.iter)
         if triple is None:
-            return node
+            raise UnrollError(
+                "attr[{'unroll': True}] 는 range(...) 인자가 모두 컴파일 타임 "
+                "상수일 때만 펼칠 수 있습니다(CompileVar 로 바인딩하거나 리터럴)."
+            )
+        if not _safe_to_unroll(node):
+            raise UnrollError(
+                "attr[{'unroll': True}] 가 붙은 for 의 본문이 안전하지 않습니다 "
+                "(break/continue/for-else/루프변수 Store 중 하나)."
+            )
+
         start, stop, step = triple
         values = list(range(start, stop, step))
-        if not _can_unroll(node, len(values), self.threshold):
-            return node
+        if len(values) > self.threshold:
+            raise UnrollError(
+                f"펼침 횟수 {len(values)} 가 임계값 {self.threshold} 를 초과합니다."
+            )
 
         if not values:
             # range(0) 등 빈 반복: 부모 본문이 비지 않도록 Pass 로 대체.
@@ -217,9 +202,9 @@ class _Unroller(ast.NodeTransformer):
 
 
 def unroll(tree: ast.AST, threshold: int = DEFAULT_THRESHOLD) -> ast.AST:
-    """:func:`mark_template_loops` 가 표시한 for 루프를 펼친다.
+    """``attr[{'unroll': True}]`` 로 표시된 for 루프를 펼친다.
 
-    ``threshold`` 보다 큰 반복 횟수는 코드 폭발을 막기 위해 펼치지 않는다.
+    표시는 :mod:`pydya.passes.parallelize` 가 attr 마커를 처리하면서 단다.
     """
     new_tree = _Unroller(threshold).visit(tree)
     ast.fix_missing_locations(new_tree)

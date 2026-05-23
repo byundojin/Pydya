@@ -1,8 +1,11 @@
 """Nadya 스타일 컴파일 타임 unroll 을 보여준다.
 
-``W = CompileVar('W')`` 로 컴파일 타임에 고정되는 반복 횟수를 두면,
-``for i in range(W)`` 가 ``i = 0..W-1`` 로 완전히 펼쳐진다. Nadya 의
-``template<>`` 메타프로그래밍이 SIMD 슬롯폭만큼 펼치는 것의 Python 재현.
+``attr[{'unroll': True}]`` 마커 한 줄로 다음 for 루프를 컴파일 타임에 펼친다.
+``range`` 인자는 컴파일 타임에 상수로 결정되어야 한다(예: ``CompileVar``).
+
+주의 — 이 unroll 은 현재 *부분평가의 substrate* 다. CPython 바이트코드 VM
+위에서는 펼친 코드가 자동으로 빨라지지 않는다. 진짜 가속은 Phase 2 (C Tensor) /
+Phase 3 (표현식 융합) 에서 본문이 네이티브로 lowering 된 뒤에 따라온다.
 
 실행:  PYTHONPATH=. python examples/unroll_example.py
 """
@@ -10,10 +13,12 @@
 from pydya import compile_source
 
 SOURCE = """\
+from pydya import attr
 W = CompileVar('W')
 
 def dot_product(a, b):
     result = 0
+    attr[{'unroll': True}]
     for i in range(W):
         result += a[i] * b[i]
     return result
