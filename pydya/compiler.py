@@ -11,6 +11,7 @@ from pydya.passes.dce import eliminate_dead_code
 from pydya.passes.fold import fold
 from pydya.passes.inline import inline_calls
 from pydya.passes.parallelize import parallelize
+from pydya.passes.unroll import unroll
 
 
 def optimize(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
@@ -20,6 +21,8 @@ def optimize(tree: ast.AST, static_values: Mapping[str, Any]) -> ast.AST:
     본문에 직접 적용하기 위해 공유한다).
     """
     fold(tree, static_values)
+    # fold 가 CompileVar 이름을 상수로 바꾼 다음에 unroll 이 정적 range 를 펼친다.
+    unroll(tree)
     eliminate_branches(tree)
     inline_calls(tree)
     eliminate_dead_code(tree)
@@ -32,10 +35,20 @@ def compile_source(source: str, env: Optional[Mapping[str, Any]] = None) -> str:
 
     ``env`` 는 ``CompileVar(...)`` 에 전달한 이름을 컴파일 타임 값으로
     매핑한다. 변환된 소스를 문자열로 반환한다.
+
+    파이프라인 순서: collect → fold → parallelize → unroll → branch → inline → dce.
+    parallelize 가 ``attr[parallel]`` 마커가 붙은 for 를 먼저 병렬 호출로 lowering
+    해야 unroll 이 그 자리를 모른 척 지나간다(병렬 루프가 컴파일타임에 펼쳐지면
+    의도와 어긋남).
     """
     env = dict(env or {})
     tree = ast.parse(source)
     static_values = collect_static_env(tree, env)
-    optimize(tree, static_values)
+    fold(tree, static_values)
     parallelize(tree)
+    unroll(tree)
+    eliminate_branches(tree)
+    inline_calls(tree)
+    eliminate_dead_code(tree)
+    ast.fix_missing_locations(tree)
     return ast.unparse(tree)
