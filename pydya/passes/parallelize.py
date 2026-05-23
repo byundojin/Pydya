@@ -1,19 +1,16 @@
-"""Nadya 스타일 ``attr[{...}]`` 병렬 for 루프를 병렬 실행 코드로 변환한다.
+"""``attr[{...}]`` 마커 처리 일괄 담당 패스.
 
-Nadya 의 ``attr[Parallel : true] for(...)`` 와 같은 모델이다. for 루프 바로
-앞의 ``attr[{'parallel': True}]`` 마커를 인식하고, **반복 간 파괴적 갱신이
-없는 독립 map** 인지 보수적으로 검사한 뒤 :func:`pydya.runtime.parallel_map_into`
-호출로 lowering 한다. (Nadya 가 destructive update 가 없을 때만 자동
-병렬화하는 것과 동일한 안전 규칙.)
+for 루프 바로 앞의 ``attr[{...}]`` 마커를 인식해, 옵션 키에 따라 다음과 같이
+처리한다:
 
-1차 지원 형태 — 미리 할당된 리스트로의 독립 반복 map::
+* ``{'parallel': True}`` — Nadya 의 ``attr[Parallel : true] for(...)`` 대응.
+  **반복 간 파괴적 갱신이 없는 독립 map** 인지 보수적으로 검사한 뒤
+  :func:`pydya.runtime.parallel_map_into` 호출로 lowering.
+* ``{'unroll': True}`` — for 노드에 ``_UNROLL_FLAG`` 를 달아 이후
+  :mod:`pydya.passes.unroll` 이 펼치도록 한다.
 
-    attr[{'parallel': True}]
-    for i in <iter>:
-        out[i] = <expr>     # out 을 읽지 않고, 인덱스는 정확히 i
-
-이외의 형태(누적 append, 외부 변수 갱신, 다중 문장 등)는 파괴적 갱신으로
-보고 :class:`UnsafeParallelLoop` 를 던진다.
+두 키가 동시에 참이면 충돌로 거부한다(같은 루프를 병렬 호출로 바꾸면서 동시에
+펼치는 의미가 모호). 마커 자체는 항상 제거된다.
 """
 
 from __future__ import annotations
@@ -22,13 +19,15 @@ import ast
 import builtins
 from typing import List, Optional, Tuple
 
+from pydya.passes.unroll import _UNROLL_FLAG, UnrollError
+
 _RT_ALIAS = "__pydya_rt"
 _BODY_FIELDS = ("body", "orelse", "finalbody")
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
 
 class UnsafeParallelLoop(Exception):
-    """``attr`` 로 병렬을 요청했으나 안전한 독립 map 으로 증명할 수 없을 때."""
+    """``attr[{'parallel': True}]`` 를 안전한 독립 map 으로 증명할 수 없을 때."""
 
 
 def _is_attr_marker(node: ast.stmt) -> bool:
@@ -165,7 +164,13 @@ def _process_body(stmts: List[ast.stmt], state: dict) -> List[ast.stmt]:
                     "attr[...] 마커 다음에는 for 루프가 와야 합니다."
                 )
             _recurse(nxt, state)
-            if _is_truthy_const(opts.get("parallel")):
+            want_parallel = _is_truthy_const(opts.get("parallel"))
+            want_unroll = _is_truthy_const(opts.get("unroll"))
+            if want_parallel and want_unroll:
+                raise UnrollError(
+                    "attr 에 parallel 과 unroll 을 동시에 지정할 수 없습니다."
+                )
+            if want_parallel:
                 shape = _independent_map(nxt)
                 if shape is None:
                     raise UnsafeParallelLoop(
@@ -179,8 +184,12 @@ def _process_body(stmts: List[ast.stmt], state: dict) -> List[ast.stmt]:
                     )
                 )
                 state["used"] = True
+            elif want_unroll:
+                # 이후 unroll 패스가 처리하도록 노드에 플래그만 단다.
+                setattr(nxt, _UNROLL_FLAG, True)
+                new.append(nxt)
             else:
-                # parallel 이 아니면 마커만 제거하고 직렬 루프로 둔다.
+                # 알려진 키가 없으면 마커만 제거하고 루프는 그대로 둔다.
                 new.append(nxt)
             i += 2
             continue
