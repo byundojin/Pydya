@@ -294,6 +294,49 @@ static PyMethodDef Tensor_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+/* ─── 모듈 레벨 융합 커널 (Phase 3) ────────────────────────────────────── */
+
+/* a * b + c — 세 텐서 모두 같은 size, 단일 할당 단일 메모리 순회.
+ * 미융합 a*b+c 는 임시 텐서 2개를 만들고 메모리를 두 번 더 순회한다. */
+static PyObject *tensor_madd(PyObject *Py_UNUSED(self), PyObject *args) {
+    PyObject *a_obj, *b_obj, *c_obj;
+    if (!PyArg_ParseTuple(args, "OOO", &a_obj, &b_obj, &c_obj)) return NULL;
+    if (!Py_IS_TYPE(a_obj, &TensorType) ||
+        !Py_IS_TYPE(b_obj, &TensorType) ||
+        !Py_IS_TYPE(c_obj, &TensorType)) {
+        PyErr_SetString(PyExc_TypeError, "madd requires three Tensor arguments");
+        return NULL;
+    }
+    TensorObject *ta = (TensorObject *)a_obj;
+    TensorObject *tb = (TensorObject *)b_obj;
+    TensorObject *tc = (TensorObject *)c_obj;
+    if (ta->size != tb->size || ta->size != tc->size) {
+        PyErr_Format(PyExc_ValueError,
+                     "madd: tensor sizes must match (got %zd, %zd, %zd)",
+                     ta->size, tb->size, tc->size);
+        return NULL;
+    }
+    TensorObject *out = new_uninit_tensor(ta->size);
+    if (out == NULL) return NULL;
+    const float * restrict pa = ta->data;
+    const float * restrict pb = tb->data;
+    const float * restrict pc = tc->data;
+    float * restrict po = out->data;
+    Py_ssize_t n = ta->size;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        po[i] = pa[i] * pb[i] + pc[i];
+    }
+    Py_END_ALLOW_THREADS
+    return (PyObject *)out;
+}
+
+static PyMethodDef _tensor_module_methods[] = {
+    {"madd", tensor_madd, METH_VARARGS,
+     "a * b + c element-wise (fused). 세 텐서 모두 같은 size 여야 한다."},
+    {NULL, NULL, 0, NULL},
+};
+
 /* ─── repr ─────────────────────────────────────────────────────────────── */
 
 static PyObject *Tensor_repr(TensorObject *self) {
@@ -348,6 +391,7 @@ static struct PyModuleDef _tensormodule = {
     .m_name = "pydya._tensor",
     .m_doc = "C 레벨 1D float32 Tensor primitive.",
     .m_size = -1,
+    .m_methods = _tensor_module_methods,
 };
 
 PyMODINIT_FUNC PyInit__tensor(void) {
