@@ -751,6 +751,108 @@ static PyObject *tensor_linear_relu(PyObject *Py_UNUSED(self), PyObject *args) {
     return (PyObject *)out;
 }
 
+/* ─── Scalar 변종 (auto-vectorize 끄기) — 벤치마크 비교용 ──────────────────
+ *
+ * 같은 알고리즘을 *컴파일러 SIMD 패스를 끈* 형태로 따로 빌드한다. C 레벨
+ * 실행 비용 (Python 인터프리터 대비 raw C 핫루프) 만 측정하기 위해.
+ *
+ *   stage A → B → C → D 로 비교:
+ *     A: Pure Python
+ *     B: C scalar    (이 섹션)  ── A→B 가 'C-Level Tensor' 기여
+ *     C: C vectorized (위 일반 ops)  ── B→C 가 'Vector 최적화' 기여
+ *     D: C vec + fused linear_relu   ── C→D 가 '표현식 융합' 기여
+ *
+ * pragma 로 함수 단위 -fno-tree-vectorize 적용. restrict 도 일부러 빼서
+ * 컴파일러가 aliasing 가정해 SIMD 못 쓰게 한다.
+ */
+#pragma GCC push_options
+#pragma GCC optimize("no-tree-vectorize", "no-tree-slp-vectorize")
+
+static PyObject *tensor_matmul_scalar(PyObject *Py_UNUSED(self), PyObject *args) {
+    PyObject *W_obj, *x_obj;
+    if (!PyArg_ParseTuple(args, "OO", &W_obj, &x_obj)) return NULL;
+    if (!Py_IS_TYPE(W_obj, &TensorType) || !Py_IS_TYPE(x_obj, &TensorType)) {
+        PyErr_SetString(PyExc_TypeError, "matmul_scalar requires two Tensor arguments");
+        return NULL;
+    }
+    TensorObject *W = (TensorObject *)W_obj;
+    TensorObject *x = (TensorObject *)x_obj;
+    if (W->ndim != 2 || x->ndim != 1) {
+        PyErr_SetString(PyExc_ValueError, "matmul_scalar supports 2D @ 1D only");
+        return NULL;
+    }
+    Py_ssize_t rows = W->shape[0];
+    Py_ssize_t cols = W->shape[1];
+    if (cols != x->shape[0]) {
+        PyErr_SetString(PyExc_ValueError, "matmul_scalar shape mismatch");
+        return NULL;
+    }
+    Py_ssize_t out_dims[1] = {rows};
+    TensorObject *out = new_uninit_tensor_with_shape(out_dims, 1);
+    if (out == NULL) return NULL;
+    const float *pw = W->data;
+    const float *px = x->data;
+    float *po = out->data;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < rows; ++i) {
+        const float *row = pw + i * cols;
+        float acc = 0.0f;
+        for (Py_ssize_t j = 0; j < cols; ++j) {
+            acc += row[j] * px[j];
+        }
+        po[i] = acc;
+    }
+    Py_END_ALLOW_THREADS
+    return (PyObject *)out;
+}
+
+static PyObject *tensor_add_scalar(PyObject *Py_UNUSED(self), PyObject *args) {
+    PyObject *a_obj, *b_obj;
+    if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj)) return NULL;
+    if (!Py_IS_TYPE(a_obj, &TensorType) || !Py_IS_TYPE(b_obj, &TensorType)) {
+        PyErr_SetString(PyExc_TypeError, "add_scalar requires two Tensors");
+        return NULL;
+    }
+    TensorObject *a = (TensorObject *)a_obj;
+    TensorObject *b = (TensorObject *)b_obj;
+    if (!shapes_equal(a, b)) {
+        PyErr_SetString(PyExc_ValueError, "add_scalar shape mismatch");
+        return NULL;
+    }
+    TensorObject *out = new_uninit_tensor_like(a);
+    if (out == NULL) return NULL;
+    const float *pa = a->data;
+    const float *pb = b->data;
+    float *po = out->data;
+    Py_ssize_t n = a->size;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; ++i) po[i] = pa[i] + pb[i];
+    Py_END_ALLOW_THREADS
+    return (PyObject *)out;
+}
+
+static PyObject *tensor_relu_scalar(PyObject *Py_UNUSED(self), PyObject *arg) {
+    if (!Py_IS_TYPE(arg, &TensorType)) {
+        PyErr_SetString(PyExc_TypeError, "relu_scalar requires a Tensor");
+        return NULL;
+    }
+    TensorObject *t = (TensorObject *)arg;
+    TensorObject *out = new_uninit_tensor_like(t);
+    if (out == NULL) return NULL;
+    const float *pi = t->data;
+    float *po = out->data;
+    Py_ssize_t n = t->size;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        float v = pi[i];
+        po[i] = v > 0.0f ? v : 0.0f;
+    }
+    Py_END_ALLOW_THREADS
+    return (PyObject *)out;
+}
+
+#pragma GCC pop_options
+
 static PyMethodDef _tensor_module_methods[] = {
     {"madd", tensor_madd, METH_VARARGS,
      "a * b + c element-wise (fused). 세 텐서 모두 같은 shape 여야 한다."},
@@ -760,6 +862,12 @@ static PyMethodDef _tensor_module_methods[] = {
      "element-wise max(0, x). 입력과 동일 shape 텐서 반환."},
     {"linear_relu", tensor_linear_relu, METH_VARARGS,
      "relu(W @ x + b) 단일 패스 융합. W 2D, x/b 1D, 같은 행 수."},
+    {"matmul_scalar", tensor_matmul_scalar, METH_VARARGS,
+     "[벤치마크용] 같은 matmul 을 컴파일러 auto-vectorize 끈 채로 실행."},
+    {"relu_scalar", tensor_relu_scalar, METH_O,
+     "[벤치마크용] auto-vectorize 끈 relu."},
+    {"add_scalar", tensor_add_scalar, METH_VARARGS,
+     "[벤치마크용] auto-vectorize 끈 element-wise add."},
     {NULL, NULL, 0, NULL},
 };
 
