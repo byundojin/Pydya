@@ -166,3 +166,130 @@ def test_madd_wrong_types_raises():
     a = Tensor([1.0, 2.0])
     with pytest.raises(TypeError):
         madd(a, a, [1.0, 2.0])  # 3번째가 Tensor 아님
+
+
+# ─── linear_relu 융합 패턴 ─────────────────────────────────────────────
+
+
+def test_linear_relu_via_at_operator():
+    out = _compile(
+        """
+        def f(W: Tensor, x: Tensor, b: Tensor):
+            return relu(W @ x + b)
+        """
+    )
+    assert "__pydya_t.linear_relu(W, x, b)" in out
+    assert "import pydya._tensor as __pydya_t" in out
+
+
+def test_linear_relu_via_matmul_call():
+    out = _compile(
+        """
+        def f(W: Tensor, x: Tensor, b: Tensor):
+            return relu(matmul(W, x) + b)
+        """
+    )
+    assert "__pydya_t.linear_relu(W, x, b)" in out
+
+
+def test_linear_relu_commutative_add():
+    out = _compile(
+        """
+        def f(W: Tensor, x: Tensor, b: Tensor):
+            return relu(b + W @ x)
+        """
+    )
+    assert "__pydya_t.linear_relu(W, x, b)" in out
+
+
+def test_tensor_local_propagation_through_assignment():
+    # h 가 Tensor-producing 식에서 왔으므로 두 번째 패턴도 융합돼야 한다.
+    out = _compile(
+        """
+        def f(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor):
+            h = relu(W1 @ x + b1)
+            return relu(W2 @ h + b2)
+        """
+    )
+    assert out.count("__pydya_t.linear_relu") == 2
+
+
+def test_bare_tensor_func_names_get_qualified():
+    # 어노테이션 있는 함수에서 bare matmul/relu 호출이 qualify 된다
+    out = _compile(
+        """
+        def f(W: Tensor, x: Tensor):
+            return matmul(W, x)
+        """
+    )
+    assert "__pydya_t.matmul(W, x)" in out
+
+
+def test_no_annotation_no_qualify():
+    # 어노테이션 없는 함수의 bare matmul 은 손대지 않는다 (Tensor 컨텍스트 없음)
+    out = _compile(
+        """
+        def f(a, b):
+            return matmul(a, b)
+        """
+    )
+    assert "matmul(a, b)" in out
+    assert "__pydya_t" not in out
+
+
+def test_partial_annotation_no_fusion():
+    # b 가 어노테이션 안 됐으면 융합 X
+    out = _compile(
+        """
+        def f(W: Tensor, x: Tensor, b):
+            return relu(W @ x + b)
+        """
+    )
+    assert "linear_relu" not in out
+
+
+# ─── end-to-end: 실제 실행해서 결과 확인 ────────────────────────────────
+
+
+def test_linear_relu_compiled_function_runs():
+    ns, compiled = _exec_compiled(
+        """
+        def step(W: Tensor, x: Tensor, b: Tensor):
+            return relu(W @ x + b)
+        """
+    )
+    assert "linear_relu" in compiled
+    W = Tensor([[1.0, -2.0], [3.0, 4.0]])
+    x = Tensor([5.0, 6.0])
+    b = Tensor([-100.0, 10.0])
+    out = ns["step"](W, x, b)
+    # relu(W@x + b) = relu([1*5-2*6, 3*5+4*6] + [-100, 10]) = relu([-107, 49]) = [0, 49]
+    assert out.to_list() == [0.0, 49.0]
+
+
+def test_xor_mlp_via_compile_source():
+    """XOR MLP 가 compile_source 를 통해 융합되고, 진리표 4개를 맞추는지."""
+    ns, compiled = _exec_compiled(
+        """
+        def xor_mlp(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor):
+            h = relu(W1 @ x + b1)
+            return relu(W2 @ h + b2)
+        """
+    )
+    assert compiled.count("__pydya_t.linear_relu") == 2
+
+    W1 = Tensor([[1.0, 1.0], [1.0, 1.0]])
+    b1 = Tensor([0.0, -1.0])
+    W2 = Tensor([[1.0, -2.0]])
+    b2 = Tensor([0.0])
+
+    fwd = ns["xor_mlp"]
+    for x_vals, expected in [
+        ([0.0, 0.0], 0.0),
+        ([0.0, 1.0], 1.0),
+        ([1.0, 0.0], 1.0),
+        ([1.0, 1.0], 0.0),
+    ]:
+        x = Tensor(x_vals)
+        out = fwd(x, W1, b1, W2, b2)
+        assert out.to_list() == [expected]
