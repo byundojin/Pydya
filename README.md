@@ -253,17 +253,22 @@ def forward(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor):
 
 ## 측정 결과
 
-벤치마크는 `benchmarks/` 디렉터리에서 실행할 수 있다. 4코어 i5 기준.
+벤치마크는 `benchmarks/` 에서 실행할 수 있다. 분포(min/p50/p95/p99/std) 까지
+같이 본다. 4코어 i5 기준.
 
 | 측정 | 결과 |
 |---|---|
-| 병렬 map (3.14 서브인터프리터, 순수 파이썬 본문, N=8) | **2.63x** vs 직렬 |
-| 병렬 map (3.11 스레드풀, 동일 본문) | 0.95x (GIL 한계, 정확성만 보장) |
-| C Tensor `a * b` (N=1M vs 파이썬 list) | **47x** |
-| C Tensor `a * b + a` (체인) | 30x |
-| 표현식 융합 `a*b+c` (Phase 3 over Phase 2) | **1.65x** 추가 + float32 epsilon 수준 정밀도 향상(FMA) |
-| Dense+ReLU 1024×1024 (linear_relu 융합 over 미융합) | 1.10x (큰 matmul 이 대부분 차지) |
-| 손글씨 숫자 8×8 MLP 추론 (held-out 50 샘플) | **98% 정확도** |
+| C Tensor element-wise (`bench_tensor_ops.py`, N=1K~1M vs Python list) | **88~266x** |
+| C Tensor matmul (2D × 1D, 다양 shape) | **37~51x** |
+| 표현식 융합 `a*b+c` (`bench_madd.py`, N=1K~4M) | **1.4~5.2x** (N 클수록 큼) |
+| `linear_relu` 융합 (`bench_linear_relu.py`, hidden=128~2048) | **1.15~1.20x** |
+| `attr[unroll]` (`bench_unroll.py`, 분기 많은 작은 루프) | **1.5~2.5x** |
+| `attr[parallel]` (3.14 서브인터프리터, 무거운 본문, 4코어) | **2.76x** (이상적 4x 의 69%) |
+| `attr[parallel]` (3.11 스레드풀, 동일 본문) | 1.05x (GIL) |
+| 손글씨 숫자 추론 (`examples/digit_inference.py`) | **98% 정확도** (50샘플) |
+| 종합 추론 4단계 분해 (`feature_breakdown_benchmark.py`, huge 3-layer) | C-Level 98%, SIMD 2.8%, Fusion 0.1% |
+
+**각 숫자가 왜 그렇게 나오는지** 는 [`docs/PERF.md`](docs/PERF.md) 에 정리.
 
 ## 패스 파이프라인
 
@@ -325,7 +330,18 @@ python examples/fusion_example.py        # 표현식 융합
 python examples/xor_inference.py         # XOR MLP 추론
 python examples/digit_inference.py       # 손글씨 숫자 8×8 MLP 추론
 
-# 벤치마크
+# 기능별 벤치마크 (각자 그 기능이 돋보이는 워크로드)
+python benchmarks/bench_tensor_ops.py       # C Tensor raw ops
+python benchmarks/bench_madd.py             # 표현식 융합 madd
+python benchmarks/bench_linear_relu.py      # Dense+ReLU 융합
+python benchmarks/bench_unroll.py           # attr[unroll]
+python benchmarks/bench_parallel.py         # attr[parallel]
+
+# 종합 추론 벤치 (4단계 분해)
+python benchmarks/feature_breakdown_benchmark.py        # small/medium/large/huge
+python benchmarks/digit_inference_benchmark.py          # PRE vs COMPILED
+
+# 초기 벤치 (개발 단계용, 참고)
 python benchmarks/parallel_benchmark.py
 python benchmarks/tensor_benchmark.py
 python benchmarks/fusion_benchmark.py
