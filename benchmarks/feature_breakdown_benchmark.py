@@ -1,33 +1,23 @@
-"""종합 추론 KPI 벤치마크 — 기능별 기여도 + 연산별 시간 분포.
+"""종합 추론 KPI 벤치마크 — 정밀판.
 
-세 가지 정직한 측정:
+이 벤치는 KPI 다. *어떤 op 를 몇 번 돌렸는지 / min·max·mean 분포 / 왜 그
+숫자가 나오는지* 까지 다 보인다.
 
-  1) **단계별 forward time** (분포까지)
-       A   Pure Python (list-of-list)
-       A'  Pure Python (array.array, 평탄 contiguous)
-       B   C Tensor scalar (auto-vectorize 끈 변종)
-       C   C Tensor vectorized
-       D   C vec + 융합 (compile_source → linear_relu)
+측정 원칙:
+  - 모든 측정은 _stats.time_stable 로 adaptive inner repeat + warmup. CoV < 10%
+    목표. 표본수 × inner × 총 호출수 를 명시해 *무엇을 몇 번 돌렸는지* 한눈에.
+  - 연산별 단독 측정 — 사전 계산된 입력으로 *해당 op 만* 격리해 호출. matmul
+    / add / relu / linear_relu 각각 분포.
+  - 단계별 forward 측정 — 같은 알고리즘을 4단계 (Pure Python / C scalar /
+    C vectorized / Fused) 로 측정.
+  - 이론 합 vs 실측 sanity — op 단독 합 ≈ stage forward 측정인지 점검.
+  - 각 수치의 이론적 근거 (FLOPs, ns/op, 메모리 traffic) 함께 출력.
 
-     gap 의 의미:
-       A   → A'  데이터 레이아웃 (list-of-list → 평탄 contiguous, Python loop 유지)
-       A'  → B   네이티브 루프 (Python loop → C 핫루프)
-       B   → C   Vector 최적화 (auto-vectorize / SIMD)
-       C   → D   표현식 융합 (relu(W@x+b) → linear_relu)
-
-  2) **연산별 호출 통계** — forward 한 번에 어떤 연산이 몇 번 호출되고
-     각각이 얼마나 걸리는지 (min/p50/mean/p99/std). 시간이 어디서 가는지
-     투명하게.
-
-  3) **모델 크기 sweep** — small/medium/large/huge. fusion 효과가 모델 크기에
-     따라 어떻게 변하는지 가시화.
-
-실행:  PYTHONPATH=. python benchmarks/feature_breakdown_benchmark.py [size]
+실행: PYTHONPATH=. python benchmarks/feature_breakdown_benchmark.py [size]
 """
 
 from __future__ import annotations
 
-import array
 import os
 import random
 import sys
@@ -45,36 +35,62 @@ from pydya._tensor import (
 )
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _stats import Stats, fmt_time, time_samples
+from _stats import Stats, fmt_time
 
 random.seed(0)
 
 MODELS = {
-    "small":  {"layers": [64,  32,         10], "n_samples": 1000},
-    "medium": {"layers": [256, 128,        10], "n_samples": 1000},
-    "large":  {"layers": [784, 1024,       10], "n_samples": 1000},
-    "huge":   {"layers": [784, 2048, 1024, 10], "n_samples": 1000},
+    "small":  {"layers": [64,  32,         10]},
+    "medium": {"layers": [256, 128,        10]},
+    "large":  {"layers": [784, 1024,       10]},
+    "huge":   {"layers": [784, 2048, 1024, 10]},
 }
 
-FORWARD_SRC_2 = """\
+FORWARD_SRC_2L = """\
 def forward(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor):
     h = relu(W1 @ x + b1)
     return W2 @ h + b2
 """
-
-FORWARD_SRC_3 = """\
-def forward(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor, W3: Tensor, b3: Tensor):
+FORWARD_SRC_3L = """\
+def forward(x: Tensor, W1: Tensor, b1: Tensor, W2: Tensor, b2: Tensor,
+            W3: Tensor, b3: Tensor):
     h1 = relu(W1 @ x + b1)
     h2 = relu(W2 @ h1 + b2)
     return W3 @ h2 + b3
 """
 
+N_SAMPLES = 200       # 표본 수 (각 측정마다)
+TARGET_OP_US = 100    # op 단독 측정 한 표본의 목표 시간
+TARGET_STAGE_US = 500 # stage forward 측정 한 표본의 목표 시간
+WARMUP = 10
 
-# ─── 데이터 (5가지 표현) ───────────────────────────────────────────────
+
+def time_stable(fn: Callable, target_us: float, n_samples: int = N_SAMPLES):
+    """안정 측정 — adaptive inner repeat 으로 *표본당 시간* 이 target 이상.
+
+    반환: (Stats, inner, total_calls). total_calls = n_samples * inner 가
+    *총 몇 번 호출했는지*.
+    """
+    for _ in range(WARMUP):
+        fn()
+    t0 = time.perf_counter()
+    fn()
+    one = max(time.perf_counter() - t0, 1e-9)
+    inner = max(1, int(target_us * 1e-6 / one))
+
+    samples = []
+    for _ in range(n_samples):
+        t0 = time.perf_counter()
+        for _ in range(inner):
+            fn()
+        samples.append((time.perf_counter() - t0) / inner)
+    return Stats(samples), inner, n_samples * inner
+
+
+# ─── 데이터 ───────────────────────────────────────────────────────────
 
 
 def make_weights_py(layers):
-    """List-of-list 형태 (A 단계용)."""
     Ws, bs = [], []
     for i in range(len(layers) - 1):
         in_, out_ = layers[i], layers[i + 1]
@@ -84,81 +100,27 @@ def make_weights_py(layers):
     return Ws, bs
 
 
-def make_weights_array(weights_py):
-    """같은 가중치를 array.array('f') 평탄 contiguous 로 (A' 단계용)."""
-    Ws_arr = []
-    bs_arr = []
-    Ws_py, bs_py = weights_py
-    for W, b in zip(Ws_py, bs_py):
-        rows, cols = len(W), len(W[0])
-        flat = array.array("f", [0.0] * (rows * cols))
-        for i in range(rows):
-            for j in range(cols):
-                flat[i * cols + j] = W[i][j]
-        Ws_arr.append((flat, rows, cols))
-        bs_arr.append(array.array("f", b))
-    return Ws_arr, bs_arr
+# ─── 단계별 forward ────────────────────────────────────────────────────
 
 
-def make_weights_tensor(weights_py):
-    """같은 가중치를 pydya.Tensor 로 (B/C/D 단계용)."""
-    Ws_py, bs_py = weights_py
-    return [Tensor(W) for W in Ws_py], [Tensor(b) for b in bs_py]
-
-
-def make_samples_py(n, dim):
-    return [[random.gauss(0, 1) for _ in range(dim)] for _ in range(n)]
-
-
-# ─── Stage A: Pure Python list-of-list ─────────────────────────────────
-
-
-def _matvec_relu_listlist(W, b, x, apply_relu):
-    rows = len(W)
-    cols = len(x)
+def _matvec_relu_py(W, b, x, do_relu):
+    rows, cols = len(W), len(x)
     out = [0.0] * rows
     for i in range(rows):
         acc = b[i]
         row = W[i]
         for j in range(cols):
             acc += row[j] * x[j]
-        out[i] = (acc if acc > 0.0 else 0.0) if apply_relu else acc
+        out[i] = (acc if acc > 0.0 else 0.0) if do_relu else acc
     return out
 
 
-def forward_listlist(x, Ws, bs):
+def forward_pure_python(x, Ws, bs):
     h = x
     last = len(Ws) - 1
     for i in range(len(Ws)):
-        h = _matvec_relu_listlist(Ws[i], bs[i], h, apply_relu=(i < last))
+        h = _matvec_relu_py(Ws[i], bs[i], h, do_relu=(i < last))
     return h
-
-
-# ─── Stage A': Pure Python with array.array (flat) ─────────────────────
-
-
-def _matvec_relu_array(W_tuple, b, x, apply_relu):
-    W_flat, rows, cols = W_tuple
-    out = array.array("f", [0.0] * rows)
-    for i in range(rows):
-        acc = b[i]
-        base = i * cols
-        for j in range(cols):
-            acc += W_flat[base + j] * x[j]
-        out[i] = (acc if acc > 0.0 else 0.0) if apply_relu else acc
-    return out
-
-
-def forward_array(x, Ws, bs):
-    h = x
-    last = len(Ws) - 1
-    for i in range(len(Ws)):
-        h = _matvec_relu_array(Ws[i], bs[i], h, apply_relu=(i < last))
-    # array.array → list 로 한 번 변환 (정합성 비교용)
-    return list(h)
-
-
-# ─── Stage B: C scalar ─────────────────────────────────────────────────
 
 
 def forward_c_scalar(x, Ws, bs):
@@ -171,9 +133,6 @@ def forward_c_scalar(x, Ws, bs):
     return h
 
 
-# ─── Stage C: C vectorized ────────────────────────────────────────────
-
-
 def forward_c_vec(x, Ws, bs):
     h = x
     last = len(Ws) - 1
@@ -184,15 +143,11 @@ def forward_c_vec(x, Ws, bs):
     return h
 
 
-# ─── Stage D: compile_source → fused ──────────────────────────────────
-
-
-def make_compiled_forward(n_layers):
-    src = FORWARD_SRC_2 if n_layers == 2 else FORWARD_SRC_3
-    compiled = compile_source(src)
+def make_compiled(n_layers):
+    src = FORWARD_SRC_2L if n_layers == 2 else FORWARD_SRC_3L
     ns = {}
-    exec(compiled, ns)
-    return ns["forward"], compiled
+    exec(compile_source(src), ns)
+    return ns["forward"]
 
 
 def call_compiled(fn, x, Ws, bs):
@@ -201,225 +156,203 @@ def call_compiled(fn, x, Ws, bs):
     return fn(x, Ws[0], bs[0], Ws[1], bs[1], Ws[2], bs[2])
 
 
-# ─── 측정 ──────────────────────────────────────────────────────────────
+# ─── 표 출력 ──────────────────────────────────────────────────────────
 
 
-def time_one_pass(forward_fn, xs, *args) -> List[float]:
-    """xs 전체에 대해 forward 한 번씩, 각 호출의 시간을 리스트로 반환."""
-    times = []
-    for x in xs:
-        start = time.perf_counter()
-        forward_fn(x, *args)
-        times.append(time.perf_counter() - start)
-    return times
+def print_row(label, n_samples, inner, total, s: Stats):
+    print(
+        f"  {label:<28} {n_samples:>5}×{inner:<6} ={total:>7,}  "
+        f"{fmt_time(s.min):>9} {fmt_time(s.p50):>9} {fmt_time(s.mean):>9} "
+        f"{fmt_time(s.p99):>9} {fmt_time(s.std):>9} {s.cov*100:>5.1f}%"
+    )
 
 
-def time_one_pass_compiled(fn, xs, Ws, bs) -> List[float]:
-    times = []
-    for x in xs:
-        start = time.perf_counter()
-        call_compiled(fn, x, Ws, bs)
-        times.append(time.perf_counter() - start)
-    return times
+def print_header():
+    print(
+        f"  {'label':<28} {'samples×inner':<13} {'총호출':>9}  "
+        f"{'min':>9} {'p50':>9} {'mean':>9} {'p99':>9} {'std':>9} {'CoV':>6}"
+    )
+    print("  " + "─" * 110)
 
 
-def profile_per_op_c_vec(xs_t, Ws_t, bs_t) -> Dict[str, List[float]]:
-    """C vec 경로의 각 연산을 forward 안에서 개별 측정. 미융합 기준."""
-    n_layers = len(Ws_t)
-    op_times: Dict[str, List[float]] = {f"matmul L{i+1}": [] for i in range(n_layers)}
-    op_times.update({f"add L{i+1}": [] for i in range(n_layers)})
-    for i in range(n_layers - 1):
-        op_times[f"relu L{i+1}"] = []
-
-    for x in xs_t:
-        h = x
-        for li in range(n_layers):
-            t0 = time.perf_counter()
-            mm = matmul(Ws_t[li], h)
-            t1 = time.perf_counter()
-            ab = mm + bs_t[li]
-            t2 = time.perf_counter()
-            op_times[f"matmul L{li+1}"].append(t1 - t0)
-            op_times[f"add L{li+1}"].append(t2 - t1)
-            if li < n_layers - 1:
-                t3 = time.perf_counter()
-                h = relu(ab)
-                t4 = time.perf_counter()
-                op_times[f"relu L{li+1}"].append(t4 - t3)
-            else:
-                h = ab
-    return op_times
+# ─── 메인 ─────────────────────────────────────────────────────────────
 
 
-def profile_per_op_fused(xs_t, Ws_t, bs_t) -> Dict[str, List[float]]:
-    """융합 경로의 각 연산 — linear_relu 가 matmul+add+relu 를 한 호출로 묶음."""
-    n_layers = len(Ws_t)
-    op_times: Dict[str, List[float]] = {}
-    for i in range(n_layers - 1):
-        op_times[f"linear_relu L{i+1}"] = []
-    op_times[f"matmul L{n_layers}"] = []
-    op_times[f"add L{n_layers}"] = []
-
-    for x in xs_t:
-        h = x
-        for li in range(n_layers - 1):
-            t0 = time.perf_counter()
-            h = linear_relu(Ws_t[li], h, bs_t[li])
-            t1 = time.perf_counter()
-            op_times[f"linear_relu L{li+1}"].append(t1 - t0)
-        t0 = time.perf_counter()
-        mm = matmul(Ws_t[-1], h)
-        t1 = time.perf_counter()
-        ab = mm + bs_t[-1]
-        t2 = time.perf_counter()
-        op_times[f"matmul L{n_layers}"].append(t1 - t0)
-        op_times[f"add L{n_layers}"].append(t2 - t1)
-    return op_times
-
-
-def max_abs_diff(a, b):
-    if hasattr(a, "to_list"): a = a.to_list()
-    if hasattr(b, "to_list"): b = b.to_list()
-    return max(abs(x - y) for x, y in zip(a, b))
-
-
-def run_model(name, spec, skip_pure_python=False):
+def run_model(name, spec):
     layers = spec["layers"]
-    n = spec["n_samples"]
-    arch_str = " → ".join(str(d) for d in layers)
-    print(f"\n{'━' * 92}")
-    print(f" model: {name}  ({arch_str}),  N samples = {n:,}")
-    print('━' * 92)
+    n_layers = len(layers) - 1
+    arch = " → ".join(str(d) for d in layers)
+
+    print(f"\n{'═' * 116}")
+    print(f" model: {name}  ({arch})")
+    print('═' * 116)
 
     Ws_py, bs_py = make_weights_py(layers)
-    Ws_arr, bs_arr = make_weights_array((Ws_py, bs_py))
-    Ws_t, bs_t = make_weights_tensor((Ws_py, bs_py))
-    xs_py = make_samples_py(n, layers[0])
-    xs_arr = [array.array("f", x) for x in xs_py]
-    xs_t = [Tensor(x) for x in xs_py]
+    Ws_t = [Tensor(W) for W in Ws_py]
+    bs_t = [Tensor(b) for b in bs_py]
+    x_py = [random.gauss(0, 1) for _ in range(layers[0])]
+    x_t = Tensor(x_py)
 
-    forward_compiled, compiled_src = make_compiled_forward(len(Ws_py))
-    if name == "small":
-        print("compiled source (small 예시):")
-        for line in compiled_src.strip().splitlines():
-            print(f"    {line}")
+    forward_compiled = make_compiled(n_layers)
 
-    # 정합성
-    ref_a = forward_listlist(xs_py[0], Ws_py, bs_py)
-    ref_a2 = forward_array(xs_arr[0], Ws_arr, bs_arr)
-    ref_b = forward_c_scalar(xs_t[0], Ws_t, bs_t).to_list()
-    ref_c = forward_c_vec(xs_t[0], Ws_t, bs_t).to_list()
-    ref_d = call_compiled(forward_compiled, xs_t[0], Ws_t, bs_t).to_list()
-    diff = {
-        "A→A'": max_abs_diff(ref_a, ref_a2),
-        "A→B": max_abs_diff(ref_a, ref_b),
-        "A→C": max_abs_diff(ref_a, ref_c),
-        "A→D": max_abs_diff(ref_a, ref_d),
-    }
+    # 사전 계산: 각 op 격리 측정에 필요한 중간 상태
+    h_inputs = [x_t]  # h_inputs[li] = layer li 의 입력 (이미 relu 까지 통과)
+    for li in range(n_layers):
+        mm = matmul(Ws_t[li], h_inputs[li])
+        s = mm + bs_t[li]
+        if li < n_layers - 1:
+            h_inputs.append(relu(s))
 
-    # ─── (1) 단계별 forward 시간 분포 ─────────────────────────────────
-    print(f"\n── 단계별 forward 시간 분포 ({n:,} samples) ──────────────────")
-    print(f"  {'단계':<32}{'min':>9}{'p50':>9}{'mean':>9}{'p99':>9}{'std':>9}{'CoV':>7}")
-    print("  " + "─" * 84)
+    # ── 연산별 단독 측정 ───────────────────────────────────────────
+    print("\n## (1) 연산별 단독 측정 — 사전 계산된 입력으로 그 op 만 격리 반복")
+    print_header()
 
-    results: Dict[str, Tuple[Stats, float]] = {}
+    op_means: Dict[str, float] = {}
 
-    if not skip_pure_python:
-        times = time_one_pass(forward_listlist, xs_py, Ws_py, bs_py)
-        s = Stats(times)
-        results["A  Pure Python (list)"] = (s, 0.0)
-        print_stage(f"A  Pure Python (list)", s)
+    for li in range(n_layers):
+        in_ = layers[li]
+        out_ = layers[li + 1]
+        x_in = h_inputs[li]
+        W_in = Ws_t[li]
+        b_in = bs_t[li]
+        mm_pre = matmul(W_in, x_in)
+        sum_pre = mm_pre + b_in
 
-        times = time_one_pass(forward_array, xs_arr, Ws_arr, bs_arr)
-        s = Stats(times)
-        results["A' Pure Python (array.array)"] = (s, diff["A→A'"])
-        print_stage(f"A' Pure Python (array.array)", s)
+        # matmul
+        s, inner, total = time_stable(lambda: matmul(W_in, x_in), TARGET_OP_US)
+        print_row(f"matmul L{li+1} ({out_}×{in_})", N_SAMPLES, inner, total, s)
+        op_means[f"matmul_L{li+1}"] = s.mean
 
-    times = time_one_pass(forward_c_scalar, xs_t, Ws_t, bs_t)
-    s = Stats(times)
-    results["B  C scalar (no-SIMD)"] = (s, diff["A→B"])
-    print_stage(f"B  C scalar (no-SIMD)", s)
+        # add (tensor + tensor)
+        s, inner, total = time_stable(lambda: mm_pre + b_in, TARGET_OP_US)
+        print_row(f"add L{li+1} ({out_},)", N_SAMPLES, inner, total, s)
+        op_means[f"add_L{li+1}"] = s.mean
 
-    times = time_one_pass(forward_c_vec, xs_t, Ws_t, bs_t)
-    s = Stats(times)
-    results["C  C vectorized"] = (s, diff["A→C"])
-    print_stage(f"C  C vectorized", s)
+        if li < n_layers - 1:
+            # relu
+            s, inner, total = time_stable(lambda: relu(sum_pre), TARGET_OP_US)
+            print_row(f"relu L{li+1} ({out_},)", N_SAMPLES, inner, total, s)
+            op_means[f"relu_L{li+1}"] = s.mean
 
-    times = time_one_pass_compiled(forward_compiled, xs_t, Ws_t, bs_t)
-    s = Stats(times)
-    results["D  C vec + fused"] = (s, diff["A→D"])
-    print_stage(f"D  C vec + fused", s)
+            # linear_relu (융합 커널)
+            s, inner, total = time_stable(
+                lambda: linear_relu(W_in, x_in, b_in), TARGET_OP_US
+            )
+            print_row(f"linear_relu L{li+1}", N_SAMPLES, inner, total, s)
+            op_means[f"linear_relu_L{li+1}"] = s.mean
 
-    # 단계별 gap 정리
-    print(f"\n── 단계 gap 별 기여 (median 기준) ──────────────────")
-    labels = list(results.keys())
-    for i in range(1, len(labels)):
-        prev_s, _ = results[labels[i - 1]]
-        cur_s, _ = results[labels[i]]
-        reduction = (1 - cur_s.p50 / prev_s.p50) * 100
-        gap_name = _gap_name(labels[i - 1], labels[i])
-        print(
-            f"    {labels[i - 1][:3]} → {labels[i][:3]:<4}  "
-            f"{gap_name:<24}  "
-            f"{fmt_time(prev_s.p50)} → {fmt_time(cur_s.p50)}   "
-            f"{reduction:>6.2f}% 단축"
-        )
+    # ── 단계별 forward 측정 ───────────────────────────────────────
+    print("\n## (2) 단계별 forward 측정 — 같은 입력으로 forward 전체 반복")
+    print_header()
 
-    # ─── (2) 연산별 호출 통계 (C vec 경로) ────────────────────────────
-    print(f"\n── 연산별 호출 통계 (C vec, {n:,} forward 안의 각 op) ──────────────────")
-    print(f"  {'연산':<24}{'호출수':>8}{'min':>9}{'p50':>9}{'mean':>9}{'p99':>9}{'std':>9}")
-    print("  " + "─" * 80)
-    op_times = profile_per_op_c_vec(xs_t, Ws_t, bs_t)
-    op_total = 0.0
-    for op, times in op_times.items():
-        s = Stats(times)
-        op_total += s.mean * len(times)
-        print(f"  {op:<24}{len(times):>8}"
-              f"{fmt_time(s.min):>9}{fmt_time(s.p50):>9}{fmt_time(s.mean):>9}"
-              f"{fmt_time(s.p99):>9}{fmt_time(s.std):>9}")
-    print(f"  {'-- 합계 (mean × 호출수)':<32}                            {fmt_time(op_total):>9}")
+    stage_means: Dict[str, float] = {}
 
-    print(f"\n── 연산별 호출 통계 (Fused, {n:,} forward 안) ──────────────────")
-    print(f"  {'연산':<24}{'호출수':>8}{'min':>9}{'p50':>9}{'mean':>9}{'p99':>9}{'std':>9}")
-    print("  " + "─" * 80)
-    op_times = profile_per_op_fused(xs_t, Ws_t, bs_t)
-    op_total = 0.0
-    for op, times in op_times.items():
-        s = Stats(times)
-        op_total += s.mean * len(times)
-        print(f"  {op:<24}{len(times):>8}"
-              f"{fmt_time(s.min):>9}{fmt_time(s.p50):>9}{fmt_time(s.mean):>9}"
-              f"{fmt_time(s.p99):>9}{fmt_time(s.std):>9}")
-    print(f"  {'-- 합계 (mean × 호출수)':<32}                            {fmt_time(op_total):>9}")
-
-
-def _gap_name(prev_label, cur_label):
-    prev = prev_label[:2].strip()
-    cur = cur_label[:2].strip()
-    return {
-        ("A", "A'"): "데이터 레이아웃",
-        ("A'", "B"): "네이티브 루프 (C)",
-        ("B", "C"): "Vector 최적화 (SIMD)",
-        ("C", "D"): "표현식 융합",
-        ("A", "B"): "C-Level (포괄)",  # pure_python skip 시
-    }.get((prev, cur), "?")
-
-
-def print_stage(label, s: Stats):
-    print(
-        f"  {label:<32}"
-        f"{fmt_time(s.min):>9}{fmt_time(s.p50):>9}{fmt_time(s.mean):>9}"
-        f"{fmt_time(s.p99):>9}{fmt_time(s.std):>9}"
-        f"{s.cov * 100:>6.2f}%"
+    s, inner, total = time_stable(
+        lambda: forward_pure_python(x_py, Ws_py, bs_py), TARGET_STAGE_US
     )
+    print_row("A) Pure Python (list)", N_SAMPLES, inner, total, s)
+    stage_means["A"] = s.mean
+
+    s, inner, total = time_stable(
+        lambda: forward_c_scalar(x_t, Ws_t, bs_t), TARGET_STAGE_US
+    )
+    print_row("B) C scalar (no-SIMD)", N_SAMPLES, inner, total, s)
+    stage_means["B"] = s.mean
+
+    s, inner, total = time_stable(
+        lambda: forward_c_vec(x_t, Ws_t, bs_t), TARGET_STAGE_US
+    )
+    print_row("C) C vectorized", N_SAMPLES, inner, total, s)
+    stage_means["C"] = s.mean
+
+    s, inner, total = time_stable(
+        lambda: call_compiled(forward_compiled, x_t, Ws_t, bs_t), TARGET_STAGE_US
+    )
+    print_row("D) C vec + fused", N_SAMPLES, inner, total, s)
+    stage_means["D"] = s.mean
+
+    # ── 이론 합 vs 실측 sanity ────────────────────────────────────
+    print("\n## (3) 이론 합 vs 실측 — op 단독 합 ≈ forward stage?")
+    unfused_sum = 0.0
+    for li in range(n_layers):
+        unfused_sum += op_means[f"matmul_L{li+1}"]
+        unfused_sum += op_means[f"add_L{li+1}"]
+        if li < n_layers - 1:
+            unfused_sum += op_means[f"relu_L{li+1}"]
+    fused_sum = 0.0
+    for li in range(n_layers - 1):
+        fused_sum += op_means[f"linear_relu_L{li+1}"]
+    fused_sum += op_means[f"matmul_L{n_layers}"]
+    fused_sum += op_means[f"add_L{n_layers}"]
+
+    diff_unfused = abs(stage_means["C"] - unfused_sum) / stage_means["C"] * 100
+    diff_fused = abs(stage_means["D"] - fused_sum) / stage_means["D"] * 100
+    print(f"  unfused 이론 합 (op 단독 mean 합)  = {fmt_time(unfused_sum)}")
+    print(f"  unfused 실측 (C vectorized stage) = {fmt_time(stage_means['C'])}   "
+          f"(diff {diff_unfused:.1f}%)")
+    print(f"  fused 이론 합 (op 단독 mean 합)    = {fmt_time(fused_sum)}")
+    print(f"  fused 실측 (D Fused stage)         = {fmt_time(stage_means['D'])}   "
+          f"(diff {diff_fused:.1f}%)")
+
+    # ── stage gap 분석 ────────────────────────────────────────────
+    print("\n## (4) 단계 gap (mean 기준)")
+    a, b, c, d = stage_means["A"], stage_means["B"], stage_means["C"], stage_means["D"]
+    print(f"  A → B  C 레벨 핫루프         : {fmt_time(a)} → {fmt_time(b)}   "
+          f"{a/b:>5.1f}x   단축 {(1-b/a)*100:>5.2f}%")
+    print(f"  B → C  auto-vectorize/SIMD   : {fmt_time(b)} → {fmt_time(c)}   "
+          f"{b/c:>5.2f}x   단축 {(1-c/b)*100:>5.2f}%")
+    print(f"  C → D  linear_relu 융합      : {fmt_time(c)} → {fmt_time(d)}   "
+          f"{c/d:>5.2f}x   단축 {(1-d/c)*100:>5.2f}%")
+
+    # ── 이론적 근거 출력 ──────────────────────────────────────────
+    total_mac = sum(layers[i] * layers[i + 1] for i in range(n_layers))
+    print(f"\n## (5) 측정 근거 (왜 이 수치인가)")
+    print(f"  모델 컴퓨트:")
+    print(f"    matmul 총 {total_mac:,} multiply-add")
+    print(f"    bias add {sum(layers[i+1] for i in range(n_layers))} elem,  "
+          f"relu {sum(layers[i+1] for i in range(n_layers-1))} elem")
+    print(f"")
+    print(f"  Pure Python (A): {fmt_time(a)}")
+    py_ns_per_op = a / total_mac * 1e9
+    print(f"    {total_mac:,} ops 에 {fmt_time(a)} → {py_ns_per_op:.1f}ns/op.")
+    print(f"    CPython 산술 op 평균 ~30-50ns/op 와 일치 (인터프리터 BINARY_OP "
+          f"+ BINARY_SUBSCR + STORE).")
+    print(f"")
+    print(f"  C 핫루프 (B/C/D): C vec={fmt_time(c)}, fused={fmt_time(d)}")
+    c_ns_per_op = c / total_mac * 1e9
+    print(f"    C vec: {c_ns_per_op:.2f}ns/op.  CPU 1 cycle ≈ 0.3ns 기준 "
+          f"~{c_ns_per_op/0.3:.1f} cycle/op")
+    if c_ns_per_op / 0.3 < 1.0:
+        print(f"    < 1 cycle/op → 명백히 SIMD 활성. AVX2 (8 floats/cycle) 또는 ILP")
+    elif c_ns_per_op / 0.3 < 3.0:
+        print(f"    1-3 cycle/op → scalar-near-peak 또는 memory-bound.")
+    else:
+        print(f"    > 3 cycle/op → memory-bound 또는 호출 오버헤드 비중 큼.")
+    print(f"")
+    simd_ratio = b / c
+    print(f"  SIMD 효과 (B→C): {b/c:.2f}x")
+    print(f"    이론 최대 AVX2 = 8x. 실측 {simd_ratio:.2f}x 인 이유 = ")
+    print(f"    (1) scalar baseline 도 -O3 -funroll-loops 라 매우 빠름")
+    print(f"    (2) 매트멀 크기 클수록 memory-bound 로 천장 도달")
+    print(f"")
+    fusion_saving = c - d
+    print(f"  Fusion 절감 (C→D): {fmt_time(fusion_saving)}")
+    if n_layers >= 1 and f"add_L1" in op_means and f"relu_L1" in op_means:
+        add_relu_sum = op_means["add_L1"] + op_means["relu_L1"]
+        print(f"    이론 출처 = (add L1 + relu L1) 호출/alloc 오버헤드 "
+              f"= {fmt_time(add_relu_sum)} 의 일부 절감.")
+        print(f"    fused linear_relu 가 한 inner loop 안에 mul+add+relu 모두 처리해")
+        print(f"    임시 텐서 2개 alloc 와 메모리 2회 추가 패스 제거.")
 
 
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else "all"
 
-    print("=" * 92)
-    print(" Pydya 종합 추론 KPI 벤치마크 (단계 + 연산별 호출 통계)")
-    print("=" * 92)
+    print("═" * 116)
+    print(" Pydya 종합 추론 KPI 벤치마크 — 정밀판")
+    print(" 각 측정: 표본 200개 × adaptive inner (sample 당 ≥ {0}us op / {1}us stage)".format(
+        TARGET_OP_US, TARGET_STAGE_US))
+    print("═" * 116)
     print(f"  python : {sys.version.split()[0]}")
     print(f"  cpus   : {os.cpu_count()}")
     print(f"  target : {target}")
@@ -433,23 +366,7 @@ def main():
         return
 
     for size in sizes:
-        spec = MODELS[size]
-        run_model(size, spec)
-
-    print(f"\n{'=' * 92}")
-    print(" 해석 가이드:")
-    print("   - A → A' (데이터 레이아웃): list-of-list 의 nested subscript 와 평탄")
-    print("     array.array 의 차이. Python loop 가 dominate 라 차이 작음(보통 0~20%).")
-    print("   - A' → B (네이티브 루프): 같은 알고리즘을 Python 인터프리터 → C 핫")
-    print("     루프로. **여기서 압도적 가속 (수십x)** — 우리 컴파일러의 본진.")
-    print("   - B → C (SIMD): scalar baseline 도 -O3 + unroll 살아있어 큰 차이 X.")
-    print("     큰 행렬에서 memory-bound 라 SIMD 효과 더 줄어듦.")
-    print("   - C → D (융합): matmul 비중에 반비례. 작은 모델 더 의미, 큰 모델")
-    print("     은 matmul 이 시간을 다 차지해 fusion 효과 0 수렴.")
-    print("   - 연산별 표: forward 안에서 시간이 *어디로* 가는지 정량.")
-    print("     fusion 의 효과가 작은 모델에선 add+relu 비중이 크고, 큰 모델은")
-    print("     matmul 압도라는 사실이 표 안 호출수 × 시간 분포에서 직접 보임.")
-    print("=" * 92)
+        run_model(size, MODELS[size])
 
 
 if __name__ == "__main__":
